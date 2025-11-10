@@ -12,7 +12,7 @@ name = "async_tasks"
 path = "src/async_tasks.rs"
 
 [dependencies]
-tracing-perfetto-writer = { path = "../tracing-perfetto-writer" }
+tracing-perfetto-writer = { path = "../tracing-perfetto-writer" , version="0.1.0"}
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
 tokio = { version = "1", features = ["full"] }
