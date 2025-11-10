@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "perfetto-writer", "tracing-perfetto-writer", "tracing-perfetto-example",
+]
+
+resolver = "2"
