@@ -305,6 +305,10 @@ impl<'a, W: io::Write> TrackBuilder<'a, W> {
         self.track.set_uuid(id);
         self
     }
+    pub fn parent_uuid(mut self, id: u64) -> Self {
+        self.track.set_parent_uuid(id);
+        self
+    }
 
     pub fn pid(mut self, pid: i32) -> Self {
         self.track.thread.mut_or_insert_default().set_pid(pid);
@@ -340,17 +344,26 @@ impl<'a, W: io::Write> TrackBuilder<'a, W> {
     }
 
     pub fn unit_name<T: Into<String>>(mut self, name: T) -> Self {
-        self.track.counter.mut_or_insert_default().set_unit_name(name.into());
+        self.track
+            .counter
+            .mut_or_insert_default()
+            .set_unit_name(name.into());
         self
     }
 
     pub fn unit_multiplier(mut self, multiplier: i64) -> Self {
-        self.track.counter.mut_or_insert_default().set_unit_multiplier(multiplier);
+        self.track
+            .counter
+            .mut_or_insert_default()
+            .set_unit_multiplier(multiplier);
         self
     }
 
     pub fn is_incremental(mut self, incremental: bool) -> Self {
-        self.track.counter.mut_or_insert_default().set_is_incremental(incremental);
+        self.track
+            .counter
+            .mut_or_insert_default()
+            .set_is_incremental(incremental);
         self
     }
 
@@ -1104,11 +1117,7 @@ mod tests {
         let mut ctx = Context::new(buf.writer());
 
         // Create a basic counter track
-        ctx.track()
-            .uuid(300)
-            .name("memory_usage")
-            .counter()
-            .build();
+        ctx.track().uuid(300).name("memory_usage").counter().build();
 
         let buf: BytesMut = ctx.into_inner().into_inner();
         let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
@@ -1293,10 +1302,7 @@ mod tests {
         let buf: BytesMut = ctx.into_inner().into_inner();
         let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
 
-        assert_golden_text(
-            &trace,
-            "tests/golden/simple_event.txtpb",
-        )?;
+        assert_golden_text(&trace, "tests/golden/simple_event.txtpb")?;
 
         Ok(())
     }
@@ -1320,10 +1326,7 @@ mod tests {
         let buf: BytesMut = ctx.into_inner().into_inner();
         let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
 
-        assert_golden_text(
-            &trace,
-            "tests/golden/counter_track.txtpb",
-        )?;
+        assert_golden_text(&trace, "tests/golden/counter_track.txtpb")?;
 
         Ok(())
     }
@@ -1351,10 +1354,7 @@ mod tests {
         let buf: BytesMut = ctx.into_inner().into_inner();
         let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
 
-        assert_golden_text(
-            &trace,
-            "tests/golden/debug_annotations.txtpb",
-        )?;
+        assert_golden_text(&trace, "tests/golden/debug_annotations.txtpb")?;
 
         Ok(())
     }
