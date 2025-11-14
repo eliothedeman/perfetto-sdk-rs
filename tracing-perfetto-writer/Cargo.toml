@@ -6,7 +6,7 @@ license = "MIT"
 description = "A tracing-subscriber Layer for writing protobuf encoded perfetto traces"
 
 [dependencies]
-perfetto-writer = { path = "../perfetto-writer" , version="0.2.0"}
+perfetto-writer = { path = "../perfetto-writer" , version="0.3.0"}
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
 rand = "0.9.2"
