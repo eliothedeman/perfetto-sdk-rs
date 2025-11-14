@@ -664,7 +664,7 @@ mod tests {
         use protobuf::text_format;
 
         let golden_path = golden_path.as_ref();
-        let actual_text = text_format::print_to_string(trace);
+        let actual_text = text_format::print_to_string_pretty(trace);
 
         // Check if we should update golden files
         if std::env::var("UPDATE_GOLDEN").is_ok() {
