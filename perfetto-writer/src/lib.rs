@@ -9,6 +9,7 @@ use std::{
 };
 
 use perfetto_protos::{
+    counter_descriptor::{CounterDescriptor, counter_descriptor::Unit},
     debug_annotation::{DebugAnnotation, DebugAnnotationName},
     interned_data::InternedData,
     profile_common::InternedString,
@@ -18,6 +19,9 @@ use perfetto_protos::{
     track_descriptor::TrackDescriptor,
     track_event::{EventCategory, EventName, TrackEvent, track_event::Type},
 };
+
+// Re-export Unit enum for counter tracks
+pub use perfetto_protos::counter_descriptor::counter_descriptor::Unit as CounterUnit;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub(crate) enum InternID {
@@ -306,6 +310,31 @@ impl<'a, W: io::Write> TrackBuilder<'a, W> {
         self.tid(current_thread())
     }
 
+    pub fn counter(mut self) -> Self {
+        self.track.counter = protobuf::MessageField::some(CounterDescriptor::new());
+        self
+    }
+
+    pub fn unit(mut self, unit: Unit) -> Self {
+        self.track.counter.mut_or_insert_default().set_unit(unit);
+        self
+    }
+
+    pub fn unit_name<T: Into<String>>(mut self, name: T) -> Self {
+        self.track.counter.mut_or_insert_default().set_unit_name(name.into());
+        self
+    }
+
+    pub fn unit_multiplier(mut self, multiplier: i64) -> Self {
+        self.track.counter.mut_or_insert_default().set_unit_multiplier(multiplier);
+        self
+    }
+
+    pub fn is_incremental(mut self, incremental: bool) -> Self {
+        self.track.counter.mut_or_insert_default().set_is_incremental(incremental);
+        self
+    }
+
     pub fn build(self) -> u64 {
         let mut tp = TracePacket::new();
         let id = self.track.uuid();
@@ -577,8 +606,6 @@ impl<'a, W: io::Write> EventBuilder<'a, W> {
 
 #[cfg(test)]
 mod tests {
-    use std::thread::current;
-
     use super::*;
     use anyhow::Result;
     use assert_matches::assert_matches;
@@ -970,6 +997,176 @@ mod tests {
         assert_eq!(event.debug_annotations[3].double_value(), 0.75);
         // Check pointer annotation
         assert_eq!(event.debug_annotations[4].pointer_value(), 0xdeadbeef);
+
+        Ok(())
+    }
+
+    #[test]
+    fn counter_track_basic() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new(buf.writer());
+
+        // Create a basic counter track
+        ctx.track()
+            .uuid(300)
+            .name("memory_usage")
+            .counter()
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        // packet[0] is the init packet
+        // packet[1] is the track descriptor
+        let track = trace.packet[1].track_descriptor();
+        assert_eq!(track.uuid(), 300);
+        assert_eq!(track.name(), "memory_usage");
+        assert!(track.counter.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn counter_track_with_unit() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new(buf.writer());
+
+        // Create a counter track with unit
+        ctx.track()
+            .uuid(301)
+            .name("bytes_allocated")
+            .counter()
+            .unit(Unit::UNIT_SIZE_BYTES)
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        // packet[0] is the init packet
+        // packet[1] is the track descriptor
+        let track = trace.packet[1].track_descriptor();
+        assert_eq!(track.uuid(), 301);
+        assert_eq!(track.name(), "bytes_allocated");
+        assert!(track.counter.is_some());
+        assert_eq!(track.counter.unit(), Unit::UNIT_SIZE_BYTES);
+
+        Ok(())
+    }
+
+    #[test]
+    fn counter_track_with_custom_unit_name() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new(buf.writer());
+
+        // Create a counter track with custom unit name
+        ctx.track()
+            .uuid(302)
+            .name("cpu_temperature")
+            .counter()
+            .unit_name("celsius")
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        // packet[0] is the init packet
+        // packet[1] is the track descriptor
+        let track = trace.packet[1].track_descriptor();
+        assert_eq!(track.uuid(), 302);
+        assert_eq!(track.name(), "cpu_temperature");
+        assert!(track.counter.is_some());
+        assert_eq!(track.counter.unit_name(), "celsius");
+
+        Ok(())
+    }
+
+    #[test]
+    fn counter_track_with_multiplier() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new(buf.writer());
+
+        // Create a counter track with unit multiplier (e.g., kilobytes instead of bytes)
+        ctx.track()
+            .uuid(303)
+            .name("memory_kb")
+            .counter()
+            .unit(Unit::UNIT_SIZE_BYTES)
+            .unit_multiplier(1024)
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        // packet[0] is the init packet
+        // packet[1] is the track descriptor
+        let track = trace.packet[1].track_descriptor();
+        assert_eq!(track.uuid(), 303);
+        assert_eq!(track.name(), "memory_kb");
+        assert!(track.counter.is_some());
+        assert_eq!(track.counter.unit(), Unit::UNIT_SIZE_BYTES);
+        assert_eq!(track.counter.unit_multiplier(), 1024);
+
+        Ok(())
+    }
+
+    #[test]
+    fn counter_track_incremental() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new(buf.writer());
+
+        // Create an incremental counter track (for delta values)
+        ctx.track()
+            .uuid(304)
+            .name("packet_count_delta")
+            .counter()
+            .unit(Unit::UNIT_COUNT)
+            .is_incremental(true)
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        // packet[0] is the init packet
+        // packet[1] is the track descriptor
+        let track = trace.packet[1].track_descriptor();
+        assert_eq!(track.uuid(), 304);
+        assert_eq!(track.name(), "packet_count_delta");
+        assert!(track.counter.is_some());
+        assert_eq!(track.counter.unit(), Unit::UNIT_COUNT);
+        assert_eq!(track.counter.is_incremental(), true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn counter_track_full_configuration() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new(buf.writer());
+
+        // Create a fully configured counter track
+        ctx.track()
+            .uuid(305)
+            .name("network_throughput")
+            .counter()
+            .unit(Unit::UNIT_SIZE_BYTES)
+            .unit_name("bytes_per_second")
+            .unit_multiplier(1)
+            .is_incremental(false)
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        // packet[0] is the init packet
+        // packet[1] is the track descriptor
+        let track = trace.packet[1].track_descriptor();
+        assert_eq!(track.uuid(), 305);
+        assert_eq!(track.name(), "network_throughput");
+        assert!(track.counter.is_some());
+        assert_eq!(track.counter.unit(), Unit::UNIT_SIZE_BYTES);
+        assert_eq!(track.counter.unit_name(), "bytes_per_second");
+        assert_eq!(track.counter.unit_multiplier(), 1);
+        assert_eq!(track.counter.is_incremental(), false);
 
         Ok(())
     }
