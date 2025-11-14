@@ -123,6 +123,25 @@ where
         s
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_seq(writer: W, seq: u32) -> Self {
+        let mut s = Self {
+            writer: io::BufWriter::new(writer),
+            event_names: Default::default(),
+            debug_annotation_names: Default::default(),
+            debug_annotation_str_values: Default::default(),
+            categories: Default::default(),
+            thread_tracks: Default::default(),
+            source_locations: Default::default(),
+            seq,
+            trace: Default::default(),
+            next_id: 0.into(),
+        };
+        let init = s.init_packet();
+        s.trace.packet.push(init);
+        s
+    }
+
     pub fn current_thread_track(&mut self) -> u64 {
         let current = current_thread();
         if let Some(track) = self.thread_tracks.get(&current) {
@@ -612,6 +631,84 @@ mod tests {
     use bytes::{Buf, BufMut, BytesMut};
     use perfetto_protos::trace::Trace;
     use protobuf::Message;
+    use std::fs;
+    use std::path::Path;
+
+    /// Assert that a Trace matches the text representation stored in a golden file.
+    ///
+    /// This function converts the given Trace to protobuf text format and compares it
+    /// with the contents of the file at the specified path. If the contents don't match,
+    /// the test will fail with a detailed diff.
+    ///
+    /// Set the `UPDATE_GOLDEN` environment variable to update golden files:
+    /// ```bash
+    /// UPDATE_GOLDEN=1 cargo test
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `trace` - The Trace to compare
+    /// * `golden_path` - Path to the golden file (relative to workspace root)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let buf = BytesMut::new();
+    /// let mut ctx = Context::new(buf.writer());
+    /// ctx.event().with_begin().with_name("test").with_track_uuid(1).build();
+    /// let buf: BytesMut = ctx.into_inner().into_inner();
+    /// let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+    /// assert_golden_text(&trace, "tests/golden/simple_event.txtpb")?;
+    /// ```
+    fn assert_golden_text(trace: &Trace, golden_path: impl AsRef<Path>) -> Result<()> {
+        use protobuf::text_format;
+
+        let golden_path = golden_path.as_ref();
+        let actual_text = text_format::print_to_string(trace);
+
+        // Check if we should update golden files
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            // Ensure parent directory exists
+            if let Some(parent) = golden_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(golden_path, &actual_text)?;
+            eprintln!("Updated golden file: {}", golden_path.display());
+            return Ok(());
+        }
+
+        // Read the expected golden file
+        let expected_text = fs::read_to_string(golden_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to read golden file at '{}': {}.\n\
+                 Hint: Run with UPDATE_GOLDEN=1 to create this file.",
+                golden_path.display(),
+                e
+            )
+        })?;
+
+        // Compare the texts
+        if actual_text != expected_text {
+            // Create a helpful error message
+            let diff_msg = format!(
+                "\nGolden file mismatch for: {}\n\
+                 \n\
+                 Expected:\n\
+                 {}\n\
+                 \n\
+                 Actual:\n\
+                 {}\n\
+                 \n\
+                 Hint: Run with UPDATE_GOLDEN=1 to update the golden file.",
+                golden_path.display(),
+                expected_text,
+                actual_text
+            );
+            anyhow::bail!(diff_msg);
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn same_id() -> Result<()> {
@@ -1167,6 +1264,97 @@ mod tests {
         assert_eq!(track.counter.unit_name(), "bytes_per_second");
         assert_eq!(track.counter.unit_multiplier(), 1);
         assert_eq!(track.counter.is_incremental(), false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn golden_simple_event() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new_with_seq(buf.writer(), 12345);
+
+        // Use a fixed track UUID for deterministic output
+        let track = ctx.track().uuid(100).name("test_thread").build();
+
+        ctx.event()
+            .with_begin()
+            .with_name("test_event")
+            .with_category("test_category")
+            .with_track_uuid(track)
+            .build();
+
+        ctx.event()
+            .with_end()
+            .with_name("test_event")
+            .with_category("test_category")
+            .with_track_uuid(track)
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        assert_golden_text(
+            &trace,
+            "tests/golden/simple_event.txtpb",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn golden_counter_track() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new_with_seq(buf.writer(), 12345);
+
+        // Create a counter track with full configuration
+        ctx.track()
+            .uuid(100)
+            .name("cpu_usage")
+            .counter()
+            .unit(Unit::UNIT_COUNT)
+            .unit_name("percent")
+            .unit_multiplier(1)
+            .is_incremental(false)
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        assert_golden_text(
+            &trace,
+            "tests/golden/counter_track.txtpb",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn golden_debug_annotations() -> Result<()> {
+        let buf = BytesMut::new();
+        let mut ctx = Context::new_with_seq(buf.writer(), 12345);
+
+        // Use a fixed track UUID for deterministic output
+        let track = ctx.track().uuid(200).name("annotation_thread").build();
+
+        ctx.event()
+            .with_begin()
+            .with_name("annotated_event")
+            .with_category("annotations")
+            .with_track_uuid(track)
+            .with_debug_bool("is_enabled", true)
+            .with_debug_int("count", 42)
+            .with_debug_uint("id", 123)
+            .with_debug_double("ratio", 3.14)
+            .with_debug_str("message", "Hello, Perfetto!")
+            .build();
+
+        let buf: BytesMut = ctx.into_inner().into_inner();
+        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+
+        assert_golden_text(
+            &trace,
+            "tests/golden/debug_annotations.txtpb",
+        )?;
 
         Ok(())
     }
