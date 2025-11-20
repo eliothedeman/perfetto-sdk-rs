@@ -1,5 +1,4 @@
 use perfetto_writer::{Context, EventBuilder};
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tracing::field::Visit;
 use tracing::{Subscriber, span};
@@ -35,20 +34,20 @@ impl From<u64> for TrackId {
     }
 }
 
-struct EventBuilderVisitor<'a, W: Write>(EventBuilder<'a, W>);
+struct EventBuilderVisitor<'a>(EventBuilder<'a>);
 
-impl<'a, W: Write> Visit for EventBuilderVisitor<'a, W> {
+impl<'a> Visit for EventBuilderVisitor<'a> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         self.0.debug_str(field.name(), &format!("{:?}", value));
     }
 }
 
 /// A tracing layer that writes trace events to Perfetto format
-pub struct PerfettoLayer<W: Write + Send + 'static> {
-    context: Arc<Mutex<Context<W>>>,
+pub struct PerfettoLayer {
+    context: Arc<Mutex<Context>>,
 }
 
-impl<W: Write + Send + 'static> Clone for PerfettoLayer<W> {
+impl Clone for PerfettoLayer {
     fn clone(&self) -> Self {
         Self {
             context: Arc::clone(&self.context),
@@ -56,27 +55,27 @@ impl<W: Write + Send + 'static> Clone for PerfettoLayer<W> {
     }
 }
 
-impl<W: Write + Send + std::fmt::Debug + 'static> PerfettoLayer<W> {
-    /// Creates a new PerfettoLayer with the given writer
-    pub fn new(writer: W) -> Self {
-        let ctx = Context::new(writer);
+impl PerfettoLayer {
+    /// Creates a new PerfettoLayer
+    pub fn new() -> Self {
+        let ctx = Context::new();
 
         Self {
             context: Arc::new(Mutex::new(ctx)),
         }
     }
 
-    /// Flushes the underlying Perfetto context
-    pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.context.lock().unwrap().flush()?;
-        Ok(())
+    /// Flushes the underlying Perfetto context to a Vec
+    pub fn flush(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut buf = Vec::new();
+        self.context.lock().unwrap().write_to(&mut buf)?;
+        Ok(buf)
     }
 }
 
-impl<S, W> Layer<S> for PerfettoLayer<W>
+impl<S> Layer<S> for PerfettoLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
-    W: Write + Send + std::fmt::Debug + 'static,
 {
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: LayerContext<'_, S>) {
         let mut context = self.context.lock().unwrap();
@@ -185,21 +184,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{BufMut, BytesMut};
     use tracing_subscriber::prelude::*;
 
     #[test]
     fn test_layer_creation() {
-        let buf = BytesMut::new();
-        let layer = PerfettoLayer::new(buf.writer());
+        let layer = PerfettoLayer::new();
         // Just ensure it compiles and creates successfully
         drop(layer);
     }
 
     #[test]
     fn test_layer_with_subscriber() {
-        let buf = BytesMut::new();
-        let layer = PerfettoLayer::new(buf.writer());
+        let layer = PerfettoLayer::new();
 
         let subscriber = tracing_subscriber::registry().with(layer);
 

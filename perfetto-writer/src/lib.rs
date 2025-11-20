@@ -3,7 +3,7 @@ use protobuf::{Message, MessageField};
 use smol_str::SmolStr;
 use std::{
     collections::HashMap,
-    io::{self, Write},
+    io::Write,
     sync::atomic::{AtomicU64, Ordering::Relaxed},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -79,66 +79,35 @@ impl<T: Clone + std::hash::Hash + Eq> Intern<T> {
     }
 }
 
-pub struct Context<W: io::Write> {
+#[derive(Default)]
+pub struct Context {
     event_names: Intern<SmolStr>,
     debug_annotation_names: Intern<SmolStr>,
     debug_annotation_str_values: Intern<SmolStr>,
     categories: Intern<SmolStr>,
     source_locations: Intern<(SmolStr, u32)>,
-    trace: Trace,
+    buffer: Trace,
     seq: u32,
-    writer: io::BufWriter<W>,
     next_id: AtomicU64,
     thread_tracks: HashMap<i32, u64>,
 }
-impl<W> Context<W>
-where
-    W: io::Write + std::fmt::Debug,
-{
-    pub fn into_inner(mut self) -> W {
-        self.flush().unwrap();
-        self.writer.into_inner().unwrap()
-    }
-}
 
-impl<W> Context<W>
-where
-    W: io::Write,
-{
-    pub fn new(writer: W) -> Self {
-        let mut s = Self {
-            writer: io::BufWriter::new(writer),
-            event_names: Default::default(),
-            debug_annotation_names: Default::default(),
-            debug_annotation_str_values: Default::default(),
-            categories: Default::default(),
-            thread_tracks: Default::default(),
-            source_locations: Default::default(),
-            seq: rand::random(),
-            trace: Default::default(),
-            next_id: 0.into(),
-        };
+impl Context {
+    pub fn new() -> Self {
+        let mut s = Self::default();
         let init = s.init_packet();
-        s.trace.packet.push(init);
+        s.buffer.packet.push(init);
         s
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_seq(writer: W, seq: u32) -> Self {
+    pub(crate) fn new_with_seq(seq: u32) -> Self {
         let mut s = Self {
-            writer: io::BufWriter::new(writer),
-            event_names: Default::default(),
-            debug_annotation_names: Default::default(),
-            debug_annotation_str_values: Default::default(),
-            categories: Default::default(),
-            thread_tracks: Default::default(),
-            source_locations: Default::default(),
             seq,
-            trace: Default::default(),
-            next_id: 0.into(),
+            ..Default::default()
         };
         let init = s.init_packet();
-        s.trace.packet.push(init);
+        s.buffer.packet.push(init);
         s
     }
 
@@ -159,13 +128,13 @@ where
         tp
     }
 
-    pub fn flush(&mut self) -> Result<()> {
-        let trace = std::mem::take(&mut self.trace);
-        trace.write_to_writer(&mut self.writer)?;
-        self.writer.flush()?;
+    pub fn write_to<W: Write>(&mut self, w: &mut W) -> Result<()> {
+        let trace = std::mem::take(&mut self.buffer);
+        trace.write_to_writer(w)?;
+        w.flush()?;
         Ok(())
     }
-    pub fn event<'a>(&'a mut self) -> EventBuilder<'a, W> {
+    pub fn event<'a>(&'a mut self) -> EventBuilder<'a> {
         EventBuilder::new(self)
     }
 
@@ -173,7 +142,7 @@ where
         self.next_id.fetch_add(1, Relaxed)
     }
 
-    pub fn track<'a>(&'a mut self) -> TrackBuilder<'a, W> {
+    pub fn track<'a>(&'a mut self) -> TrackBuilder<'a> {
         let id = self.next_id();
         TrackBuilder::new(self).uuid(id)
     }
@@ -269,12 +238,12 @@ where
     }
 }
 
-impl<'a, W: Write> Context<W> {
+impl<'a> Context {
     fn push_packet(&'a mut self, mut packet: TracePacket) {
         if !packet.has_trusted_packet_sequence_id() {
             packet.set_trusted_packet_sequence_id(self.seq);
         }
-        self.trace.packet.push(packet);
+        self.buffer.packet.push(packet);
     }
 }
 pub fn current_thread() -> i32 {
@@ -289,13 +258,13 @@ pub fn current_thread() -> i32 {
     }
 }
 
-pub struct TrackBuilder<'a, W: io::Write> {
+pub struct TrackBuilder<'a> {
     track: TrackDescriptor,
-    ctx: &'a mut Context<W>,
+    ctx: &'a mut Context,
 }
 
-impl<'a, W: io::Write> TrackBuilder<'a, W> {
-    fn new(ctx: &'a mut Context<W>) -> Self {
+impl<'a> TrackBuilder<'a> {
+    fn new(ctx: &'a mut Context) -> Self {
         Self {
             track: TrackDescriptor::new(),
             ctx,
@@ -380,13 +349,13 @@ impl<'a, W: io::Write> TrackBuilder<'a, W> {
     }
 }
 
-pub struct EventBuilder<'a, W: io::Write> {
+pub struct EventBuilder<'a> {
     event: TrackEvent,
-    ctx: &'a mut Context<W>,
+    ctx: &'a mut Context,
 }
 
-impl<'a, W: io::Write> EventBuilder<'a, W> {
-    fn new(ctx: &'a mut Context<W>) -> Self {
+impl<'a> EventBuilder<'a> {
+    fn new(ctx: &'a mut Context) -> Self {
         Self {
             event: TrackEvent::new(),
             ctx,
@@ -641,7 +610,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use assert_matches::assert_matches;
-    use bytes::{Buf, BufMut, BytesMut};
+
     use perfetto_protos::trace::Trace;
     use protobuf::Message;
     use std::fs;
@@ -733,8 +702,8 @@ mod tests {
 
     #[test]
     fn owned_strings_work() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
         let track = ctx.track().current_process().current_thread().build();
 
         // Test with owned strings (e.g., from Python or user input)
@@ -760,8 +729,9 @@ mod tests {
             .with_debug_str("key", "value")
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // Verify we got the events
         assert!(trace.packet.len() > 4);
@@ -770,8 +740,8 @@ mod tests {
 
     #[test]
     fn event_round_trip() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
         ctx.event()
             .with_begin()
             .with_name("test")
@@ -787,8 +757,8 @@ mod tests {
             .with_name("best")
             .with_track_uuid(1)
             .build();
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
         // packet[0] is the init packet
         assert_matches!(trace.packet[1].interned_data.as_ref(), Some(InternedData{ event_names, .. }) if event_names[0].name() == "test");
         assert_eq!(trace.packet[2].track_event().name_iid(), 1);
@@ -801,8 +771,8 @@ mod tests {
 
     #[test]
     fn track_round_trip() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
         ctx.track()
             .uuid(100)
             .name("main_thread")
@@ -815,8 +785,8 @@ mod tests {
             .pid(100)
             .tid(102)
             .build();
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // First track descriptor
@@ -838,8 +808,8 @@ mod tests {
 
     #[test]
     fn track_current_process() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
         let expected_pid = std::process::id();
 
         ctx.track()
@@ -848,8 +818,8 @@ mod tests {
             .current_process()
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         let track = trace.packet[1].track_descriptor();
@@ -862,8 +832,8 @@ mod tests {
 
     #[test]
     fn track_current_thread() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
         let expected_tid = current_thread();
 
         ctx.track()
@@ -872,8 +842,8 @@ mod tests {
             .current_thread()
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         let track = trace.packet[1].track_descriptor();
@@ -886,8 +856,8 @@ mod tests {
 
     #[test]
     fn track_current_process_and_thread() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
         let expected_pid = std::process::id();
         let expected_tid = current_thread();
 
@@ -898,8 +868,8 @@ mod tests {
             .current_thread()
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         let track = trace.packet[1].track_descriptor();
@@ -913,8 +883,8 @@ mod tests {
 
     #[test]
     fn category_interning() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         ctx.event()
             .with_begin()
@@ -937,8 +907,8 @@ mod tests {
             .with_track_uuid(1)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // Find events and verify categories are interned correctly
         let mut event_count = 0;
@@ -979,8 +949,8 @@ mod tests {
 
     #[test]
     fn counter_values() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         ctx.event()
             .with_counter()
@@ -996,8 +966,8 @@ mod tests {
             .with_track_uuid(1)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the interned name "int_counter"
@@ -1012,8 +982,8 @@ mod tests {
 
     #[test]
     fn flow_ids() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         ctx.event()
             .with_begin()
@@ -1029,8 +999,8 @@ mod tests {
             .with_track_uuid(1)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the interned name "flow_start"
@@ -1045,8 +1015,8 @@ mod tests {
 
     #[test]
     fn extra_counters() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         ctx.event()
             .with_instant()
@@ -1056,8 +1026,8 @@ mod tests {
             .with_track_uuid(1)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the interned name
@@ -1073,8 +1043,8 @@ mod tests {
 
     #[test]
     fn debug_annotations_types() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         ctx.event()
             .with_instant()
@@ -1087,8 +1057,8 @@ mod tests {
             .with_track_uuid(1)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packets 1-5 are interned debug annotation names
@@ -1113,14 +1083,14 @@ mod tests {
 
     #[test]
     fn counter_track_basic() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         // Create a basic counter track
         ctx.track().uuid(300).name("memory_usage").counter().build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the track descriptor
@@ -1134,8 +1104,8 @@ mod tests {
 
     #[test]
     fn counter_track_with_unit() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         // Create a counter track with unit
         ctx.track()
@@ -1145,8 +1115,8 @@ mod tests {
             .unit(Unit::UNIT_SIZE_BYTES)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the track descriptor
@@ -1161,8 +1131,8 @@ mod tests {
 
     #[test]
     fn counter_track_with_custom_unit_name() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         // Create a counter track with custom unit name
         ctx.track()
@@ -1172,8 +1142,8 @@ mod tests {
             .unit_name("celsius")
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the track descriptor
@@ -1188,8 +1158,8 @@ mod tests {
 
     #[test]
     fn counter_track_with_multiplier() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         // Create a counter track with unit multiplier (e.g., kilobytes instead of bytes)
         ctx.track()
@@ -1200,8 +1170,8 @@ mod tests {
             .unit_multiplier(1024)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the track descriptor
@@ -1217,8 +1187,8 @@ mod tests {
 
     #[test]
     fn counter_track_incremental() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         // Create an incremental counter track (for delta values)
         ctx.track()
@@ -1229,8 +1199,8 @@ mod tests {
             .is_incremental(true)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the track descriptor
@@ -1246,8 +1216,8 @@ mod tests {
 
     #[test]
     fn counter_track_full_configuration() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new(buf.writer());
+        let mut buf = Vec::new();
+        let mut ctx = Context::new();
 
         // Create a fully configured counter track
         ctx.track()
@@ -1260,8 +1230,8 @@ mod tests {
             .is_incremental(false)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         // packet[0] is the init packet
         // packet[1] is the track descriptor
@@ -1279,8 +1249,8 @@ mod tests {
 
     #[test]
     fn golden_simple_event() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new_with_seq(buf.writer(), 12345);
+        let mut buf = Vec::new();
+        let mut ctx = Context::new_with_seq(12345);
 
         // Use a fixed track UUID for deterministic output
         let track = ctx.track().uuid(100).name("test_thread").build();
@@ -1299,8 +1269,8 @@ mod tests {
             .with_track_uuid(track)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         assert_golden_text(&trace, "tests/golden/simple_event.txtpb")?;
 
@@ -1309,8 +1279,8 @@ mod tests {
 
     #[test]
     fn golden_counter_track() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new_with_seq(buf.writer(), 12345);
+        let mut buf = Vec::new();
+        let mut ctx = Context::new_with_seq(12345);
 
         // Create a counter track with full configuration
         ctx.track()
@@ -1323,8 +1293,8 @@ mod tests {
             .is_incremental(false)
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         assert_golden_text(&trace, "tests/golden/counter_track.txtpb")?;
 
@@ -1333,8 +1303,8 @@ mod tests {
 
     #[test]
     fn golden_debug_annotations() -> Result<()> {
-        let buf = BytesMut::new();
-        let mut ctx = Context::new_with_seq(buf.writer(), 12345);
+        let mut buf = Vec::new();
+        let mut ctx = Context::new_with_seq(12345);
 
         // Use a fixed track UUID for deterministic output
         let track = ctx.track().uuid(200).name("annotation_thread").build();
@@ -1351,8 +1321,8 @@ mod tests {
             .with_debug_str("message", "Hello, Perfetto!")
             .build();
 
-        let buf: BytesMut = ctx.into_inner().into_inner();
-        let trace: Trace = Trace::parse_from_reader(&mut buf.reader())?;
+        ctx.write_to(&mut buf)?;
+        let trace: Trace = Trace::parse_from_bytes(&buf)?;
 
         assert_golden_text(&trace, "tests/golden/debug_annotations.txtpb")?;
 
