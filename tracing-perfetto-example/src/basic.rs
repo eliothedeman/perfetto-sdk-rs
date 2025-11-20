@@ -34,11 +34,8 @@ fn complex_operation() {
 }
 
 fn main() {
-    // Create a file to write the Perfetto trace to
-    let file = File::create("trace_basic.pftrace").expect("Failed to create trace file");
-
     // Create the Perfetto layer
-    let perfetto_layer = PerfettoLayer::new(file);
+    let perfetto_layer = PerfettoLayer::new();
 
     // Create a subscriber with the Perfetto layer
     let subscriber = tracing_subscriber::registry().with(perfetto_layer.clone());
@@ -60,7 +57,13 @@ fn main() {
     }
 
     // Flush the trace to ensure all events are written
-    perfetto_layer.flush().expect("Failed to flush trace");
+    let trace_data = perfetto_layer.flush().expect("Failed to flush trace");
+
+    // Write the trace data to a file
+    let mut file = File::create("trace_basic.pftrace").expect("Failed to create trace file");
+    use std::io::Write as _;
+    file.write_all(&trace_data)
+        .expect("Failed to write trace data");
 
     println!("Trace written to trace_basic.pftrace");
     println!("View it at: https://ui.perfetto.dev/");
