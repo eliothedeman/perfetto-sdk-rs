@@ -1,4 +1,5 @@
 use anyhow::Result;
+use dashmap::DashMap;
 use protobuf::{Message, MessageField};
 use smol_str::SmolStr;
 use std::{
@@ -61,21 +62,25 @@ impl InternID {
 }
 
 #[derive(Default, Debug)]
-pub(crate) struct Intern<T> {
-    next_id: u64,
-    items: HashMap<T, u64>,
+pub(crate) struct Intern<T: Eq + std::hash::Hash> {
+    next_id: AtomicU64,
+    items: DashMap<T, u64>,
 }
 
 impl<T: Clone + std::hash::Hash + Eq> Intern<T> {
-    pub(crate) fn intern(&mut self, value: T) -> InternID {
-        if let Some(entry) = self.items.get(&value) {
-            return InternID::Existing(*entry);
+    pub(crate) fn intern(&self, value: T) -> InternID {
+        match self.items.entry(value) {
+            dashmap::Entry::Occupied(o) => InternID::Existing(*o.get()),
+            dashmap::Entry::Vacant(v) => {
+                let id = self.next_id();
+                v.insert(id);
+                InternID::New(id)
+            }
         }
+    }
 
-        self.next_id += 1;
-        let id = self.next_id;
-        self.items.insert(value, id);
-        InternID::New(id)
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Relaxed) + 1
     }
 }
 
@@ -139,7 +144,7 @@ impl Context {
     }
 
     pub fn next_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Relaxed)
+        self.next_id.fetch_add(1, Relaxed) + 1
     }
 
     pub fn track<'a>(&'a mut self) -> TrackBuilder<'a> {
@@ -246,6 +251,7 @@ impl<'a> Context {
         self.buffer.packet.push(packet);
     }
 }
+
 pub fn current_thread() -> i32 {
     #[cfg(target_os = "linux")]
     {
@@ -694,7 +700,7 @@ mod tests {
 
     #[test]
     fn same_id() -> Result<()> {
-        let mut i = Intern::default();
+        let i = Intern::default();
         let id = i.intern("a");
         assert_eq!(id.as_u64(), i.intern("a").as_u64());
         Ok(())
