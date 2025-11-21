@@ -128,12 +128,13 @@ impl Context {
         tp
     }
 
-    pub fn write_to<W: Write>(&mut self, w: &mut W) -> Result<()> {
+    pub fn write_to(&mut self, w: &mut dyn Write) -> Result<()> {
         let trace = std::mem::take(&mut self.buffer);
         trace.write_to_writer(w)?;
         w.flush()?;
         Ok(())
     }
+
     pub fn event<'a>(&'a mut self) -> EventBuilder<'a> {
         EventBuilder::new(self)
     }
